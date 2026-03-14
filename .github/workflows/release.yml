@@ -10,14 +10,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
 
       - name: Install libtorrent-rasterbar
         run: brew install libtorrent-rasterbar
@@ -29,7 +26,6 @@ jobs:
             -scheme shade-torrent \
             -configuration Release \
             -derivedDataPath build \
-            MACOSX_DEPLOYMENT_TARGET=15.0 \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES \
