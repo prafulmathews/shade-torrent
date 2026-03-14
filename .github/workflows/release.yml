@@ -1,9 +1,11 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 1.2.0)'
+        required: true
 
 permissions:
   contents: write
@@ -13,8 +15,18 @@ jobs:
     runs-on: macos-26
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ github.event.inputs.version }}"
+          git push origin "v${{ github.event.inputs.version }}"
 
       - name: Install libtorrent-rasterbar
         run: brew install libtorrent-rasterbar
@@ -36,11 +48,9 @@ jobs:
         run: |
           APP=$(find build/Build/Products/Release -name "*.app" -maxdepth 1 | head -1)
           echo "app_path=$APP" >> $GITHUB_OUTPUT
-          echo "app_name=$(basename $APP)" >> $GITHUB_OUTPUT
 
       - name: Create DMG
         run: |
-          # Temp folder with app + Applications symlink for a drag-install experience
           mkdir dmg_staging
           cp -R "${{ steps.find_app.outputs.app_path }}" dmg_staging/
           ln -s /Applications dmg_staging/Applications
@@ -52,9 +62,11 @@ jobs:
             -format UDZO \
             shade-torrent.dmg
 
-      - name: Upload DMG to release
+      - name: Create GitHub release and upload DMG
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
           files: shade-torrent.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
