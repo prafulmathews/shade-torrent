@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Install libtorrent-rasterbar
+        run: brew install libtorrent-rasterbar
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project shade-torrent.xcodeproj \
+            -scheme shade-torrent \
+            -configuration Release \
+            -derivedDataPath build \
+            MACOSX_DEPLOYMENT_TARGET=15.0 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Find .app
+        id: find_app
+        run: |
+          APP=$(find build/Build/Products/Release -name "*.app" -maxdepth 1 | head -1)
+          echo "app_path=$APP" >> $GITHUB_OUTPUT
+          echo "app_name=$(basename $APP)" >> $GITHUB_OUTPUT
+
+      - name: Create DMG
+        run: |
+          # Temp folder with app + Applications symlink for a drag-install experience
+          mkdir dmg_staging
+          cp -R "${{ steps.find_app.outputs.app_path }}" dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+
+          hdiutil create \
+            -volname "shade-torrent" \
+            -srcfolder dmg_staging \
+            -ov \
+            -format UDZO \
+            shade-torrent.dmg
+
+      - name: Upload DMG to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: shade-torrent.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
