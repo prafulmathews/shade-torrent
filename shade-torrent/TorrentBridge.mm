@@ -231,23 +231,46 @@ struct SessionImpl {
             }
         }
 
-        // Populate resolved metadata once it's available (magnet links start without it)
+        // Populate resolved metadata and per-file stats once torrent_info is available
         try {
             auto tf = h.torrent_file();
             if (tf) {
                 s.metadataReady = YES;
                 s.resolvedName = [NSString stringWithUTF8String:tf->name().c_str()];
                 s.resolvedTotalSize = tf->total_size();
+
                 const lt::file_storage &fs = tf->files();
+                int numFiles = fs.num_files();
+
                 NSMutableArray<TorrentFileEntry *> *entries =
-                    [NSMutableArray arrayWithCapacity:fs.num_files()];
-                for (lt::file_index_t fi{0}; fi < lt::file_index_t{fs.num_files()}; ++fi) {
+                    [NSMutableArray arrayWithCapacity:numFiles];
+                for (lt::file_index_t fi{0}; fi < lt::file_index_t{numFiles}; ++fi) {
                     TorrentFileEntry *e = [[TorrentFileEntry alloc] init];
                     e.name = [NSString stringWithUTF8String:fs.file_name(fi).to_string().c_str()];
                     e.size = fs.file_size(fi);
                     [entries addObject:e];
                 }
                 s.resolvedFiles = entries;
+
+                // Per-file progress
+                std::vector<int64_t> fp;
+                h.file_progress(fp);
+                NSMutableArray<NSNumber *> *progArr = [NSMutableArray arrayWithCapacity:numFiles];
+                for (int fi = 0; fi < numFiles; fi++) {
+                    int64_t sz = fs.file_size(lt::file_index_t{fi});
+                    float pct = (sz > 0) ? (float)fp[fi] / (float)sz : 0.f;
+                    [progArr addObject:@(std::min(pct, 1.f))];
+                }
+                s.fileProgress = progArr;
+
+                // Per-file priorities
+                auto prios = h.get_file_priorities();
+                NSMutableArray<NSNumber *> *prioArr = [NSMutableArray arrayWithCapacity:numFiles];
+                for (int fi = 0; fi < numFiles; fi++) {
+                    int p = (fi < (int)prios.size()) ? (int)prios[fi] : 1;
+                    [prioArr addObject:@(p)];
+                }
+                s.filePriorities = prioArr;
             }
         } catch (...) {}
 
@@ -368,7 +391,7 @@ struct SessionImpl {
 
         // Metadata just arrived — take manual control before the scheduler starts downloading
         h.unset_flags(lt::torrent_flags::auto_managed);
-        h.pause(lt::torrent_handle::graceful_pause);
+        h.pause(); // immediate — minimise data written before user confirms
 
         TorrentFileInfo *info = [[TorrentFileInfo alloc] init];
         info.name      = [NSString stringWithUTF8String:tf->name().c_str()];
@@ -391,7 +414,7 @@ struct SessionImpl {
     }
 }
 
-- (BOOL)startPreviewDownload:(NSInteger)previewIndex error:(NSError **)error {
+- (BOOL)startPreviewDownload:(NSInteger)previewIndex savePath:(NSString *)savePath error:(NSError **)error {
     if (previewIndex < 0 || previewIndex >= (NSInteger)_impl->previewHandles.size()) {
         if (error) {
             *error = [NSError errorWithDomain:@"TorrentBridgeError"
@@ -410,11 +433,39 @@ struct SessionImpl {
             }
             return NO;
         }
-        // Promote: enable auto-management and resume
-        h.set_flags(lt::torrent_flags::auto_managed);
-        h.resume();
-        _impl->handles.push_back(h);
-        _impl->previewHandles.erase(_impl->previewHandles.begin() + previewIndex);
+        std::string newPath(savePath.UTF8String);
+        std::string currentPath = h.status().save_path;
+
+        if (currentPath != newPath) {
+            // Different path: remove and re-add fresh with the correct save_path.
+            // move_storage triggers a storage re-check even on empty torrents and kills speed.
+            auto tf = h.torrent_file();
+            _impl->session->remove_torrent(h);
+            _impl->previewHandles.erase(_impl->previewHandles.begin() + previewIndex);
+
+            lt::add_torrent_params params;
+            params.ti        = std::const_pointer_cast<lt::torrent_info>(tf);
+            params.save_path = newPath;
+
+            lt::error_code add_ec;
+            lt::torrent_handle newH = _impl->session->add_torrent(std::move(params), add_ec);
+            if (add_ec || !newH.is_valid()) {
+                if (error) {
+                    *error = [NSError errorWithDomain:@"TorrentBridgeError"
+                                                 code:add_ec.value()
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                            [NSString stringWithUTF8String:add_ec.message().c_str()]}];
+                }
+                return NO;
+            }
+            _impl->handles.push_back(newH);
+        } else {
+            // Same path: just promote directly — no re-check needed.
+            h.set_flags(lt::torrent_flags::auto_managed);
+            h.resume();
+            _impl->handles.push_back(h);
+            _impl->previewHandles.erase(_impl->previewHandles.begin() + previewIndex);
+        }
         return YES;
     } catch (std::exception const &e) {
         if (error) {
@@ -427,10 +478,61 @@ struct SessionImpl {
     }
 }
 
+- (void)setFilePriorities:(NSArray<NSNumber *> *)selectedIndices forHandleAtIndex:(NSInteger)handleIndex {
+    if (handleIndex < 0 || handleIndex >= (NSInteger)_impl->handles.size()) return;
+    try {
+        auto &h = _impl->handles[handleIndex];
+        if (!h.is_valid()) return;
+
+        auto tf = h.torrent_file();
+        if (!tf) return;
+
+        int numFiles = tf->files().num_files();
+
+        std::set<int> selected;
+        for (NSNumber *n in selectedIndices) selected.insert(n.intValue);
+
+        std::vector<lt::download_priority_t> priorities(numFiles);
+        for (int i = 0; i < numFiles; i++) {
+            priorities[i] = selected.count(i)
+                ? lt::default_priority
+                : lt::dont_download;
+        }
+        h.prioritize_files(priorities);
+
+        // Delete any partial files already written for deselected entries
+        // (can occur during the magnet metadata-fetch window before the torrent was paused)
+        std::string savePath = h.status().save_path;
+        const lt::file_storage &fs = tf->files();
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (int i = 0; i < numFiles; i++) {
+            if (selected.count(i)) continue;
+            std::string rel = fs.file_path(lt::file_index_t{i});
+            NSString *fullPath = [NSString stringWithFormat:@"%s/%s",
+                                  savePath.c_str(), rel.c_str()];
+            if ([fm fileExistsAtPath:fullPath]) {
+                [fm removeItemAtPath:fullPath error:nil];
+            }
+        }
+    } catch (...) {}
+}
+
+- (void)setFileSelected:(BOOL)selected atFileIndex:(NSInteger)fileIndex forHandleAtIndex:(NSInteger)handleIndex {
+    if (handleIndex < 0 || handleIndex >= (NSInteger)_impl->handles.size()) return;
+    try {
+        auto &h = _impl->handles[handleIndex];
+        if (!h.is_valid()) return;
+        lt::download_priority_t prio = selected ? lt::default_priority : lt::dont_download;
+        h.file_priority(lt::file_index_t{(int)fileIndex}, prio);
+    } catch (...) {}
+}
+
 - (void)cancelPreview:(NSInteger)previewIndex {
     if (previewIndex < 0 || previewIndex >= (NSInteger)_impl->previewHandles.size()) return;
     try {
-        _impl->session->remove_torrent(_impl->previewHandles[previewIndex]);
+        // delete_files removes any partial data written during the metadata-fetch window
+        _impl->session->remove_torrent(_impl->previewHandles[previewIndex],
+                                       lt::session_handle::delete_files);
         _impl->previewHandles.erase(_impl->previewHandles.begin() + previewIndex);
     } catch (...) {}
 }
