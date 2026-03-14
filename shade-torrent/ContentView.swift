@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
@@ -14,7 +15,7 @@ struct ContentView: View {
     @State private var deleteFiles = false
     @State private var showMagnetSheet = false
     @State private var magnetURI = ""
-    @State private var showMagnetPreview = false
+    @State private var showPreview = false
 
     var body: some View {
         NavigationSplitView {
@@ -41,19 +42,19 @@ struct ContentView: View {
                 manager.startMagnetPreview(uri: uri)
                 showMagnetSheet = false
                 magnetURI = ""
-                showMagnetPreview = true
+                showPreview = true
             } onCancel: {
                 showMagnetSheet = false
                 magnetURI = ""
             }
         }
-        .sheet(isPresented: $showMagnetPreview) {
-            MagnetPreviewSheet(manager: manager) {
+        .sheet(isPresented: $showPreview) {
+            TorrentAddSheet(manager: manager) {
                 manager.confirmPreviewDownload()
-                showMagnetPreview = false
+                showPreview = false
             } onCancel: {
                 manager.cancelPreview()
-                showMagnetPreview = false
+                showPreview = false
             }
         }
         .fileImporter(
@@ -65,8 +66,9 @@ struct ContentView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 let accessed = url.startAccessingSecurityScopedResource()
-                manager.addTorrent(from: url)
+                manager.startTorrentFilePreview(from: url)
                 if accessed { url.stopAccessingSecurityScopedResource() }
+                showPreview = true
             case .failure(let error):
                 manager.errorMessage = error.localizedDescription
             }
@@ -179,6 +181,17 @@ struct TorrentRow: View {
             Button("Pause") { manager.pause(id: torrentID) }
             Button("Stop")  { manager.stop(id: torrentID) }
         }
+        if !torrent.savePath.isEmpty {
+            Button("Open in Finder") {
+                let base = URL(fileURLWithPath: torrent.savePath)
+                let named = base.appendingPathComponent(torrent.name)
+                if FileManager.default.fileExists(atPath: named.path) {
+                    NSWorkspace.shared.activateFileViewerSelecting([named])
+                } else {
+                    NSWorkspace.shared.open(base)
+                }
+            }
+        }
         Divider()
         Button("Remove…", role: .destructive) { onRequestDelete() }
     }
@@ -218,20 +231,45 @@ struct TorrentDetailView: View {
                     LabeledContent("Name", value: torrent.name)
                     LabeledContent("Total Size", value: torrent.totalSize.formattedSize)
                     LabeledContent("Files", value: "\(torrent.files.count)")
+                    if !torrent.savePath.isEmpty {
+                        LabeledContent("Location", value: torrent.savePath)
+                    }
                 }
 
                 Section("Files") {
-                    ForEach(torrent.files) { file in
-                        HStack {
-                            Image(systemName: "doc")
-                                .foregroundStyle(.secondary)
-                            Text(file.name)
-                                .lineLimit(1)
-                            Spacer()
-                            Text(file.size.formattedSize)
-                                .foregroundStyle(.secondary)
-                                .font(.caption)
+                    ForEach(Array(torrent.files.enumerated()), id: \.element.id) { idx, file in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Toggle("", isOn: Binding(
+                                    get: { file.isSelected },
+                                    set: { _ in manager.toggleFile(torrentID: torrentID, fileIndex: idx) }
+                                ))
+                                .toggleStyle(.checkbox)
+                                .labelsHidden()
+
+                                Image(systemName: "doc")
+                                    .foregroundStyle(file.isSelected ? .primary : .secondary)
+                                Text(file.name)
+                                    .lineLimit(1)
+                                    .foregroundStyle(file.isSelected ? .primary : .secondary)
+                                Spacer()
+                                if file.isSelected {
+                                    Text(String(format: "%.1f%%", file.progress * 100))
+                                        .foregroundStyle(.secondary)
+                                        .font(.caption)
+                                        .frame(width: 42, alignment: .trailing)
+                                }
+                                Text(file.size.formattedSize)
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                                    .frame(width: 60, alignment: .trailing)
+                            }
+                            if file.isSelected {
+                                ProgressView(value: Double(file.progress))
+                                    .progressViewStyle(.linear)
+                            }
                         }
+                        .padding(.vertical, 2)
                     }
                 }
             }
@@ -335,56 +373,94 @@ struct DeleteConfirmationSheet: View {
     }
 }
 
-// MARK: - MagnetPreviewSheet
+// MARK: - TorrentAddSheet
 
-struct MagnetPreviewSheet: View {
+struct TorrentAddSheet: View {
     let manager: TorrentManager
     let onDownload: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
             Text("Add Torrent")
                 .font(.headline)
                 .padding(.bottom, 16)
 
             if let info = manager.previewInfo {
-                // Metadata ready
-                Group {
-                    LabeledContent("Name", value: info.name)
-                    LabeledContent("Size", value: Int64(info.totalSize).formattedSize)
-                    LabeledContent("Files", value: "\(info.files.count)")
+                // Info rows
+                LabeledContent("Name", value: info.name)
+                LabeledContent("Size", value: Int64(info.totalSize).formattedSize)
+                LabeledContent("Files", value: "\(info.files.count)")
+
+                // Save location
+                HStack {
+                    Text("Save to")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(URL(fileURLWithPath: manager.previewSavePath).lastPathComponent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                    Button("Change…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.prompt = "Select"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            manager.previewSavePath = url.path
+                            manager.previewScopedURL = url
+                        }
+                    }
+                    .buttonStyle(.borderless)
                 }
-                .padding(.bottom, 8)
+                .padding(.top, 8)
 
                 Divider()
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 12)
 
-                Text("Files")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, 4)
+                // Select all toggle header
+                let allSelected = manager.previewSelectedFiles.count == info.files.count
+                Toggle(isOn: Binding(
+                    get: { allSelected },
+                    set: { on in
+                        manager.previewSelectedFiles = on ? Set(0..<info.files.count) : []
+                    }
+                )) {
+                    Text("Files")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .toggleStyle(.checkbox)
+                .padding(.bottom, 4)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(info.files, id: \.name) { file in
-                            HStack {
-                                Image(systemName: "doc")
-                                    .foregroundStyle(.secondary)
-                                Text(file.name)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(Int64(file.size).formattedSize)
-                                    .foregroundStyle(.secondary)
-                                    .font(.caption)
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(info.files.enumerated()), id: \.offset) { idx, file in
+                            Toggle(isOn: Binding(
+                                get: { manager.previewSelectedFiles.contains(idx) },
+                                set: { on in
+                                    if on { manager.previewSelectedFiles.insert(idx) }
+                                    else  { manager.previewSelectedFiles.remove(idx) }
+                                }
+                            )) {
+                                HStack {
+                                    Image(systemName: "doc")
+                                        .foregroundStyle(.secondary)
+                                    Text(file.name)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(Int64(file.size).formattedSize)
+                                        .foregroundStyle(.secondary)
+                                        .font(.caption)
+                                }
                             }
+                            .toggleStyle(.checkbox)
                         }
                     }
                 }
                 .frame(maxHeight: 200)
             } else {
-                // Still loading
                 HStack(spacing: 12) {
                     ProgressView()
                         .controlSize(.small)
@@ -402,14 +478,14 @@ struct MagnetPreviewSheet: View {
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.escape)
-                Button("Download") { onDownload() }
-                    .disabled(manager.previewInfo == nil)
+                Button("Download", action: onDownload)
+                    .disabled(manager.previewInfo == nil || manager.previewSelectedFiles.isEmpty)
                     .keyboardShortcut(.return)
             }
             .padding(.top, 12)
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: 500)
     }
 }
 

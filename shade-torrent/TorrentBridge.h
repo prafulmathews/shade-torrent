@@ -50,6 +50,10 @@ typedef NS_ENUM(NSInteger, TorrentDownloadState) {
 @property (nonatomic, assign) int listSeeds;     // seeds in swarm (from tracker)
 @property (nonatomic, assign) int listPeers;     // peers in swarm (from tracker)
 @property (nonatomic, copy, nullable) NSString *errorMessage;
+/// Per-file download progress (0.0–1.0). nil until torrent_info is available.
+@property (nonatomic, strong, nullable) NSArray<NSNumber *> *fileProgress;
+/// Per-file priorities (0 = dont_download, >0 = downloading). nil until torrent_info is available.
+@property (nonatomic, strong, nullable) NSArray<NSNumber *> *filePriorities;
 /// Set once metadata arrives (magnet links start without it)
 @property (nonatomic, assign) BOOL metadataReady;
 @property (nonatomic, copy, nullable) NSString *resolvedName;
@@ -83,11 +87,17 @@ typedef NS_ENUM(NSInteger, TorrentDownloadState) {
 /// Poll for resolved metadata on a preview handle. Returns TorrentFileInfo once metadata arrives, nil while still loading.
 - (nullable TorrentFileInfo *)pollPreviewMetadata:(NSInteger)previewIndex;
 
-/// Promote a preview handle to an active download. Returns NO on error.
-- (BOOL)startPreviewDownload:(NSInteger)previewIndex error:(NSError **)error;
+/// Promote a preview handle to an active download, using the user-chosen savePath. Returns NO on error.
+- (BOOL)startPreviewDownload:(NSInteger)previewIndex savePath:(NSString *)savePath error:(NSError **)error;
 
 /// Cancel and remove a preview handle from the session.
 - (void)cancelPreview:(NSInteger)previewIndex;
+
+/// Set per-file download priorities. selectedIndices lists the 0-based file indices to download; all others are skipped.
+- (void)setFilePriorities:(NSArray<NSNumber *> *)selectedIndices forHandleAtIndex:(NSInteger)handleIndex;
+
+/// Toggle a single file's download priority (dont_download ↔ default_priority).
+- (void)setFileSelected:(BOOL)selected atFileIndex:(NSInteger)fileIndex forHandleAtIndex:(NSInteger)handleIndex;
 
 - (void)pauseTorrentAtIndex:(NSInteger)index;
 - (void)resumeTorrentAtIndex:(NSInteger)index;
