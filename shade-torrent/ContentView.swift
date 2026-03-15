@@ -8,6 +8,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @Bindable var updater: UpdateChecker
     @State private var manager = TorrentManager()
     @State private var isImporting = false
     @State private var selectedID: UUID?
@@ -65,9 +66,7 @@ struct ContentView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                let accessed = url.startAccessingSecurityScopedResource()
                 manager.startTorrentFilePreview(from: url)
-                if accessed { url.stopAccessingSecurityScopedResource() }
                 showPreview = true
             case .failure(let error):
                 manager.errorMessage = error.localizedDescription
@@ -80,6 +79,28 @@ struct ContentView: View {
             Button("OK") { manager.errorMessage = nil }
         } message: {
             Text(manager.errorMessage ?? "")
+        }
+        // Update available
+        .alert("Update Available", isPresented: $updater.updateAvailable) {
+            Button("Download") { updater.openReleasesPage() }
+            Button("Later", role: .cancel) { updater.updateAvailable = false }
+        } message: {
+            Text("Version \(updater.latestVersion) is available.")
+        }
+        // Already up to date (manual check only)
+        .alert("You're Up to Date", isPresented: $updater.noUpdateFound) {
+            Button("OK") { updater.noUpdateFound = false }
+        } message: {
+            Text("shade-torrent is already on the latest version.")
+        }
+        // Check failed (manual check only)
+        .alert("Update Check Failed", isPresented: Binding(
+            get: { updater.checkError != nil },
+            set: { if !$0 { updater.checkError = nil } }
+        )) {
+            Button("OK") { updater.checkError = nil }
+        } message: {
+            Text(updater.checkError ?? "")
         }
     }
 
@@ -409,7 +430,6 @@ struct TorrentAddSheet: View {
                         panel.prompt = "Select"
                         if panel.runModal() == .OK, let url = panel.url {
                             manager.previewSavePath = url.path
-                            manager.previewScopedURL = url
                         }
                     }
                     .buttonStyle(.borderless)
@@ -489,11 +509,12 @@ struct TorrentAddSheet: View {
     }
 }
 
+
 extension TorrentItem: Hashable {
     static func == (lhs: TorrentItem, rhs: TorrentItem) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 #Preview {
-    ContentView()
+    ContentView(updater: UpdateChecker())
 }

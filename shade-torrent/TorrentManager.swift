@@ -49,7 +49,6 @@ struct TorrentItem: Identifiable {
     var uploadRate: Int = 0
     var totalDone: Int64 = 0
     var savePath: String = ""
-    var scopedURL: URL? = nil   // non-nil when a custom folder was picked via NSOpenPanel
     var state: DownloadState = .queued
     var isPaused: Bool = false
     var isStopped: Bool = false
@@ -59,6 +58,7 @@ struct TorrentItem: Identifiable {
     var listPeers: Int = 0
 
     var statusLabel: String {
+        if state == .finished || state == .seeding { return state.label }
         if isStopped { return "Stopped" }
         if isPaused  { return "Paused" }
         return state.label
@@ -77,7 +77,6 @@ class TorrentManager {
     var previewInfo: TorrentFileInfo?       // nil = magnet still loading
     var isFetchingPreview: Bool = false     // true while waiting for magnet metadata
     var previewSavePath: String = ""        // user-editable save location
-    var previewScopedURL: URL? = nil        // security-scoped URL when user picked a custom folder
     var previewSelectedFiles: Set<Int> = [] // indices of files the user wants to download
     private var currentPreviewIndex: Int = -1          // magnet handle index, -1 for .torrent
     private var pendingTorrentInfo: TorrentFileInfo?   // stored for .torrent confirm
@@ -150,9 +149,6 @@ class TorrentManager {
             return
         }
 
-        // Activate sandbox access for the custom folder; keep it alive for the download
-        _ = previewScopedURL?.startAccessingSecurityScopedResource()
-
         var item = TorrentItem(
             name: info.name,
             totalSize: info.totalSize,
@@ -160,7 +156,6 @@ class TorrentManager {
             files: info.files.map { TorrentFile(name: $0.name, size: $0.size) }
         )
         item.savePath = previewSavePath
-        item.scopedURL = previewScopedURL
         torrents.append(item)
 
         // Apply file selection priorities if not all files were selected
@@ -183,7 +178,6 @@ class TorrentManager {
     private func resetPreview() {
         previewInfo = nil
         pendingTorrentInfo = nil
-        previewScopedURL = nil
         previewSelectedFiles = []
         currentPreviewIndex = -1
         isFetchingPreview = false
@@ -225,7 +219,6 @@ class TorrentManager {
 
     func remove(id: UUID, deleteData: Bool) {
         guard let index = torrents.firstIndex(where: { $0.id == id }) else { return }
-        torrents[index].scopedURL?.stopAccessingSecurityScopedResource()
         TorrentBridge.shared().removeTorrent(at: index, deleteData: deleteData)
         torrents.remove(at: index)
     }
