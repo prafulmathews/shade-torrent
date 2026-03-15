@@ -2,16 +2,24 @@
 //  shade_torrentApp.swift
 //  shade-torrent
 //
-//  Created by Praful Mathews on 10/03/26.
-//
 
 import SwiftUI
 
 @main
 struct shade_torrentApp: App {
+    @State private var updater = UpdateChecker()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(updater: updater)
+                .task { await updater.checkForUpdates() }
+        }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await updater.checkForUpdates(silent: false) }
+                }
+            }
         }
     }
 }
