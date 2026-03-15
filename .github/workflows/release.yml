@@ -38,6 +38,7 @@ jobs:
             -scheme shade-torrent \
             -configuration Release \
             -derivedDataPath build \
+            MARKETING_VERSION=${{ github.event.inputs.version }} \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES \
